@@ -378,11 +378,14 @@ At ~1,000 guardians the formula workload is roughly 10M cell comparisons per
 recalc. That is slow but survivable, so **speed alone would not justify the
 rewrite — F-00 through F-05 do.** The performance gain is a side effect.
 
+`REMOVE Discharge` is confirmed as a plain list of OSIS values in column A.
+
 ### Still open
 
-1. **`REMOVE Discharge`** — assumed to be a plain list of OSIS values in column A.
-2. **Required columns for the edit gate.** Currently A, B, C, D. See
+1. **Required columns for the edit gate.** Currently A, B, C, D. See
    `docs/migration.md` §4 for the reasoning and how to widen it.
+2. **Whether to drop IMPORTRANGE** in favour of direct `openById` reads. See
+   "Design decisions" in `docs/migration.md`.
 
 ---
 

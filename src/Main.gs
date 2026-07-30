@@ -10,6 +10,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('KIP')
     .addItem('Rebuild now', 'rebuildNow')
+    .addItem('Check imports for changes now', 'checkImportsNow')
     .addItem('Watch status', 'showWatchStatus')
     .addSeparator()
     .addItem('Start watching', 'startWatching')

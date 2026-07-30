@@ -254,6 +254,59 @@ function tick() {
   }));
 }
 
+/**
+ * Menu action: fingerprint the imported ranges right now, ignoring pollMinutes,
+ * and rebuild if anything moved.
+ *
+ * Worth knowing what this can and cannot tell you. It compares what IMPORTRANGE
+ * has currently pulled into this workbook, not what is in the source files. If
+ * IMPORTRANGE has not refreshed yet, a change made moments ago in KIP Offers is
+ * not visible here and this will correctly report "no change".
+ */
+function checkImportsNow() {
+  var ss = SpreadsheetApp.getActive();
+  var ui = SpreadsheetApp.getUi();
+
+  props_().setProperty(PROP_LAST_POLL, String(Date.now()));
+
+  var unreadable = [];
+  for (var i = 0; i < CFG.watch.hashRanges.length; i++) {
+    if (fingerprint_(ss, CFG.watch.hashRanges[i]) === null) {
+      unreadable.push(CFG.watch.hashRanges[i].sheet);
+    }
+  }
+
+  var changed = pollImports_(ss);
+
+  if (unreadable.length) {
+    ui.alert(
+      'Cannot read: ' + unreadable.join(', ') + '\n\n' +
+      'The range is erroring or empty, so it was skipped rather than treated as ' +
+      'a change. Check the IMPORTRANGE authorization on those sheets.'
+    );
+    return;
+  }
+
+  if (!changed.length) {
+    ui.alert(
+      'No change since the last check.\n\n' +
+      'Note this compares what IMPORTRANGE has already pulled into this ' +
+      'workbook. If a change was made in a source file very recently, ' +
+      'IMPORTRANGE may not have refreshed yet.'
+    );
+    return;
+  }
+
+  var summary = rebuildAll();
+  clearDirty_();
+  ui.alert(
+    'Changed: ' + changed.join(', ') + '\n\n' +
+    'Rebuilt in ' + summary.seconds + 's — ' +
+    summary.students + ' students, ' + summary.guardians + ' guardians, ' +
+    summary.warnings + ' warning(s).'
+  );
+}
+
 /** Nightly backstop, so a missed event never leaves the roster stale for long. */
 function nightlyRebuild() {
   var summary = rebuildAll();

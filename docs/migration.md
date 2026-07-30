@@ -97,6 +97,13 @@ edit trigger for a file it is not bound to**, so there is no event to hook.
 These are polled: the range is fingerprinted (MD5 over its values) and
 compared to the previous fingerprint. Different fingerprint → rebuild.
 
+> **`onEdit` does not fire on recalculation.** It fires when a person edits a
+> cell in this workbook — nothing else. A value that changes because
+> IMPORTRANGE refreshed, because a formula recalculated, or because a script
+> wrote to the cell produces no event. `onChange` does not cover it either;
+> that is for structural changes like row inserts. This is the entire reason
+> the polling half exists.
+
 Nothing rebuilds inline. Edits and polls set a dirty flag; `tick()` drains it.
 Pasting fifty rows fires `onEdit` fifty times and produces **one** rebuild.
 
@@ -134,6 +141,34 @@ plus one poll interval.
 
 **KIP → Watch status** shows installed triggers, any pending rebuild, when the
 imports were last checked, and what triggered the last build.
+
+**KIP → Check imports for changes now** forces a fingerprint comparison
+immediately, ignoring `pollMinutes`, and rebuilds if anything moved.
+
+### A limit of polling the mirror
+
+The fingerprint is taken of what IMPORTRANGE has **already pulled into this
+workbook** — not of the source file. So the chain has two independent delays:
+
+```
+edit in KIP Offers
+      ↓  IMPORTRANGE refreshes on Google's schedule   ← not under our control
+new value appears in New Students 2026
+      ↓  next poll (≤ pollMinutes)                    ← ours
+rebuild
+```
+
+The first hop is the weak one. IMPORTRANGE results are cached server-side and
+refresh on recalculation; a workbook that nobody has open may not recalculate
+promptly. If the mirror is stale, "Check imports for changes now" will
+correctly report *no change* — it is reporting on the mirror, faithfully.
+
+The deterministic fix is for the script to read the source spreadsheets
+directly with `SpreadsheetApp.openById`, which is never cached and never
+stale. That would mean the script builds the roster union itself rather than
+reading `OUTPUTTED SHEET!A:J`, absorbing `Imported Master Copy 25-26`,
+`New Students 2026`, `PASTE SHEET!X:AG` and the `A2` union formula. See
+"Design decisions" below.
 
 ### Safety interlocks
 
@@ -247,11 +282,20 @@ households, so `tick()` decides *whether* to rebuild and then rebuilds
 everything. At roughly 600 students and 1,000 guardians that is a couple of
 seconds of a single read and four writes.
 
-**IMPORTRANGE stays.** Apps Script could read the source files directly with
-`SpreadsheetApp.openById`, which would remove the polling latency entirely.
-That is a real improvement and a reasonable follow-up, but it swaps a working
-mechanism for a new one and needs a broader OAuth scope, so it is not part of
-this migration.
+**IMPORTRANGE stays, for now.** Apps Script could read the source files
+directly with `SpreadsheetApp.openById`. That removes both the polling latency
+and the staleness risk described in §4, because a direct read is never cached.
+
+The cost is that it is no longer a small change. `OUTPUTTED SHEET!A:J` is
+currently a formula reading two IMPORTRANGE-fed sheets; making the script
+authoritative means it also owns `Imported Master Copy 25-26`,
+`New Students 2026`, `PASTE SHEET!X:AG`, and the `A2` union — so those sheets
+stop being live and become script output like the rest. It also needs the
+broader `spreadsheets` OAuth scope instead of `spreadsheets.currentonly`.
+
+Worth doing if roster changes need to land in minutes rather than within the
+hour. Not worth doing if the nightly rebuild plus a manual **Check imports for
+changes now** covers the workflow.
 
 **Contacts are placed by slot number, not compacted.** `Parents Divided3`
 column headers name K through N *mobile, secondary, third, fourth*, so
