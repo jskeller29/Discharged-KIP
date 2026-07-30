@@ -3,9 +3,8 @@
 Living document. Captures the current formula-based design, known defects, and the
 migration plan toward Apps Script. Updated as each sheet is walked through.
 
-**Status:** intake in progress. Sheets documented so far: `PASTE SHEET`, `Non-Student`,
-`New Students 2026`, `OUTPUTTED SHEET`, `Parents Divided3`, `Table`, `Phone Contacts`,
-`Imported Master Copy 25-26`.
+**Status:** all sheets documented. Implementation lives in `src/`; the step-by-step
+cutover is in [`docs/migration.md`](migration.md).
 
 ---
 
@@ -130,6 +129,32 @@ formula dragged down**, positionally aligned 1:1 with `Parents Divided3` rows.
 Ordered by severity. `F-01`–`F-05` are correctness; `F-06`–`F-09` are robustness;
 `F-10`–`F-12` are performance.
 
+### F-00 — The blob is one line per *contact*, not one block per guardian
+
+Confirmed from source samples. For a student with two guardians and three
+contact values, `OUTPUTTED SHEET!H` holds **three lines**, and guardian 1
+repeats its own name on each of its lines:
+
+```
+G: *Guardian 1 - Martha Jefferson (Mother)
+   *Guardian 2 - Thomas Jefferson (Father)
+
+H: *Guardian 1 - Martha Jefferson (Mother) - Contact 1: Martha1@gmail.com
+   *Guardian 1 - Martha Jefferson (Mother) - Contact 2: Martha2@gmail.com
+   *Guardian 2 - Thomas Jefferson (Father) - Contact 1: Thomas@aol.com
+
+I: *Guardian 1 - Martha Jefferson (Mother) - Contact 1: (111) 111-1111
+```
+
+So each line is a self-contained `(slot, contact index, value)` triple. Column
+G is the roster — one line per guardian, contact part absent. A guardian with
+no phone simply has no line in `I`.
+
+Every extraction formula in `Parents Divided3` is instead built on a
+"find the guardian, then search forward for `Contact N:`" model, which is the
+root cause of F-01. The correct model is: split on newlines, parse each line
+independently, and group by slot number.
+
 ### F-01 — Guardian blocks bleed into each other (silent wrong data)
 
 `Parents Divided3` H, I, J, K, M all collapse the blob with
@@ -150,6 +175,20 @@ Guardian 1**. No error is raised.
 
 So there are **three different strategies across seven columns**, and five of them are
 wrong. Fix: apply the `♦` sentinel approach (or the line-anchored approach) uniformly.
+
+**Reachable today.** Given F-00, the failure needs only a guardian whose first
+contact slot is missing:
+
+```
+*Guardian 1 - Martha Jefferson (Mother) - Contact 2: m@x.com
+*Guardian 2 - Thomas Jefferson (Father) - Contact 1: t@y.com
+```
+
+`H2` looks for `Guardian … Martha Jefferson … Contact 1:`, finds nothing on
+Martha's own line, and runs into Thomas's — so **Martha's primary email becomes
+`t@y.com`**. `K2` makes this worse by design: its explicit `Contact 1 →
+fall back to Contact 2` rule will happily take that fallback from any later
+guardian's line. At ~1,000 guardians, some record hits this.
 
 ### F-02 — Regex escaping of guardian names is a no-op
 
@@ -226,17 +265,28 @@ failures too — revoked IMPORTRANGE authorization, a renamed source tab, a time
 converts them into "zero new students," which then flows into `OUTPUTTED SHEET` as a
 silently shorter roster. Same pattern throughout `Parents Divided3` H:N.
 
-### F-08 — `Imported Master Copy 25-26` imports one column, ten are read
+### F-08 — `Imported Master Copy 25-26` makes four IMPORTRANGE calls to one file
 
-`A2` imports `'Master Copy'!C1:C` — a single column. `OUTPUTTED SHEET!A2` reads
-`'Imported Master Copy 25-26'!A3:J` — ten. Either B:J are populated by formulas not yet
-documented, or the union is padding nine empty columns. **Open question.**
+Resolved: the sheet is assembled from five formulas.
 
-### F-09 — `Table!A5` reads `B1`, notes say the sheet name lives in `B2`
+| Cell | Imports | Lands in |
+| --- | --- | --- |
+| `A2` | `'Master Copy'!C1:C` | A |
+| `B2` | `'Master Copy'!A1:B`, asterisks stripped | B:C |
+| `D2` | `'Master Copy'!C1:F` | D:G |
+| `H2` | `'Master Copy'!G1:H` | H:I |
+| `J3` | `"MASTER"` literal | J |
 
-`INDIRECT(B1 & "!B2:P")` vs the stated `B2 = "Outputted Sheet"`. One of the two is a
-typo. Also worth noting: `INDIRECT` is volatile and recalculates on every change to the
-workbook.
+Four separate IMPORTRANGE calls to the same spreadsheet, with `Master!C` fetched
+twice (A and D — which is where the duplicated OSIS column originates). Each call is
+its own fetch, its own cache entry, and its own authorization that can lapse
+independently. One import plus `CHOOSECOLS` does the same work.
+
+### F-09 — `Table!A5` reads `B1`, notes said the sheet name lives in `B2`
+
+Resolved: `B1` holds `Outputted Sheet`; the `B2` in the walkthrough was a slip. Also
+worth noting regardless: `INDIRECT` is volatile and recalculates on every change to the
+workbook. Once `Table` is script-built the reference disappears.
 
 ### F-10 — `Parents Divided3` H:N is O(students × guardians)
 
@@ -311,26 +361,28 @@ the value of the migration.
 
 ---
 
-## 5. Open questions
+## 5. Resolved questions
 
-1. **`PASTE SHEET!N:W`** — what feeds it, and what are its columns? It is a third of the
-   `OUTPUTTED SHEET` union and currently undocumented.
-2. **`Imported Master Copy 25-26`** — where do B:J come from, given `A2` imports only
-   `'Master Copy'!C1:C`? (F-08)
-3. **`Table`** — is the source sheet name in `B1` or `B2`? (F-09)
-4. **Blob samples.** Two or three real (anonymized) values of `OUTPUTTED SHEET` G, H, and
-   I for a student with 2+ guardians. This is the single highest-value input for the
-   parser. Specifically: is `Contact N:` numbered per-guardian or globally, and does every
-   guardian block reliably start on its own line?
-5. **DNA semantics.** `Parents Divided3!G` sets `"No"` when the string starts with `*`.
-   `OUTPUTTED SHEET!O` then keeps rows where `DNA = "no"`, and `Table!G5` inverts again to
-   produce "Primary". Confirm the intended meaning end-to-end — it currently reads as a
-   triple negative.
-6. **Volume.** Roughly how many students and guardians? Determines how aggressive the
-   migration needs to be.
-7. **`REMOVE Discharge`** — is it just a list of OSIS values in column A?
-8. **Manual edits.** Does anyone type into `OUTPUTTED SHEET` K:P, `Table`, or
-   `Phone Contacts` by hand? Static writes would overwrite them, which changes the design.
+| Question | Answer |
+| --- | --- |
+| `PASTE SHEET!N:W` | `A2:I` filtered to `K = FALSE` and OSIS not already in `X:X`, deduped. Nine columns spilling into a ten-column block, so the Label column is always blank |
+| `Imported Master Copy` B:J | Four more IMPORTRANGE calls — see F-08 |
+| `Table` source cell | `B1` |
+| Blob shape | One line per contact — see F-00 |
+| `Contact N:` numbering | Per guardian slot, not global |
+| DNA semantics | `*` → `"No"`; no `*` → `"Yes"`. So a starred guardian is a primary contact, and `Table`'s "Primary" is the inverse of the `DNA` column |
+| Volume | ~1,000 guardians (~600 students) |
+| Manual edits to script-owned ranges | None — static writes are safe |
+
+At ~1,000 guardians the formula workload is roughly 10M cell comparisons per
+recalc. That is slow but survivable, so **speed alone would not justify the
+rewrite — F-00 through F-05 do.** The performance gain is a side effect.
+
+### Still open
+
+1. **`REMOVE Discharge`** — assumed to be a plain list of OSIS values in column A.
+2. **Required columns for the edit gate.** Currently A, B, C, D. See
+   `docs/migration.md` §4 for the reasoning and how to widen it.
 
 ---
 
@@ -339,3 +391,4 @@ the value of the migration.
 | Date | Change |
 | --- | --- |
 | 2026-07-30 | Initial architecture capture from formula walkthrough; findings F-01–F-12 |
+| 2026-07-30 | Source samples resolved F-00 (one line per contact), F-08, F-09 and the open questions; script implementation landed in `src/`; migration steps in `docs/migration.md` |
