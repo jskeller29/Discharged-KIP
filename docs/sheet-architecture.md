@@ -21,8 +21,9 @@ flowchart TD
     NONSTU["Non-Student A:L<br/>(manual, filter L='')"] --> PSX
     NS --> PSX["PASTE SHEET X:AG"]
 
-    PSA["PASTE SHEET A:K<br/>(manual paste)"]
-    PSN["PASTE SHEET N:W<br/>❓ undocumented"]
+    PSA["PASTE SHEET A:K<br/>(manual paste)"] --> PSN
+    PSA --> PSX
+    PSN["PASTE SHEET N:W<br/>(A:I where In/Out=FALSE,<br/>not already in X:X)"]
 
     IMC --> OUT["OUTPUTTED SHEET A:J<br/>(union, minus REMOVE Discharge)"]
     PSX --> OUT
@@ -54,7 +55,7 @@ sheets and everything downstream.
 | Range | Purpose |
 | --- | --- |
 | `A:K` | Manual paste. Headers: OSIS, Last Name, First Name, OSIS, Site, Class/Teacher, Parent Name, Email Address, Parent Cell, Label, In our Out |
-| `N:W` | **Undocumented.** Consumed by `OUTPUTTED SHEET` as a third union input (10 cols) |
+| `N:W` | Formula. `A2:I` where `K = FALSE` and the OSIS is not already in `X:X`, deduped. Nine columns spilling into a ten-column block, so the Label column is always blank |
 | `X:AG` | Formula. Stacks `Non-Student` (where L is blank) + `New Students 2026` |
 
 `X2` wraps both `FILTER`s in `IFERROR` with a blank-row fallback, then strips blank rows
@@ -120,13 +121,14 @@ formula dragged down**, positionally aligned 1:1 with `Parents Divided3` rows.
 
 ### `Imported Master Copy 25-26`
 
-`A2` — `IMPORTRANGE(…, "'Master Copy'!C1:C")`. Single column. See [F-08](#f-08).
+`A:J`, assembled from five formulas making four separate `IMPORTRANGE` calls to the
+same source spreadsheet. See [F-08](#f-08) for the cell-by-cell layout.
 
 ---
 
 ## 3. Findings
 
-Ordered by severity. `F-01`–`F-05` are correctness; `F-06`–`F-09` are robustness;
+Ordered by severity. `F-00`–`F-05` are correctness; `F-06`–`F-09` are robustness;
 `F-10`–`F-12` are performance.
 
 ### F-00 — The blob is one line per *contact*, not one block per guardian
