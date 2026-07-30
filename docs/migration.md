@@ -132,7 +132,11 @@ in `Config.gs`:
 | --- | --- | --- |
 | `tickMinutes` | 5 | Longest wait between an edit and its rebuild |
 | `pollMinutes` | 30 | How often imported ranges are fingerprinted |
-| `safetyNetHour` | 4 | Nightly rebuild regardless of flags |
+| `safetyNetHours` | 6 | Unconditional rebuild, regardless of flags |
+| `staleAfterHours` | 14 | Watch status warns past this age |
+
+`safetyNetHours` accepts 1, 2, 4, 6, 8, or 12 — Apps Script does not allow
+arbitrary hourly intervals.
 
 Polling faster than 30 minutes buys nothing: IMPORTRANGE refreshes on its own
 schedule, so the local mirror will not show a change until it does. Worst-case
@@ -143,7 +147,8 @@ plus one poll interval.
 imports were last checked, and what triggered the last build.
 
 **KIP → Check imports for changes now** forces a fingerprint comparison
-immediately, ignoring `pollMinutes`, and rebuilds if anything moved.
+immediately, ignoring `pollMinutes`, and rebuilds if anything moved. Use it
+when you know a source file changed and do not want to wait for the poll.
 
 ### A limit of polling the mirror
 
@@ -172,10 +177,29 @@ reading `OUTPUTTED SHEET!A:J`, absorbing `Imported Master Copy 25-26`,
 
 ### Safety interlocks
 
-A rebuild is skipped, not attempted, when the imported range is unreadable —
-`#REF!`, `#N/A`, or zero non-blank rows. A revoked IMPORTRANGE authorization
-would otherwise look like "all students deleted" and write an empty roster
-over everything.
+**Unreadable ranges are skipped, not acted on.** When a polled range reads
+`#REF!`, `#N/A`, or comes back with zero non-blank rows, it is treated as
+unreadable and left alone. A revoked IMPORTRANGE authorization would otherwise
+look like "all students deleted" and write an empty roster over everything.
+
+**A failed rebuild does not lose its trigger.** The dirty flag and any new
+fingerprints are committed only *after* `rebuildAll()` returns. If it throws,
+both survive, the next tick retries, and the exception still propagates so
+Google sends its own failure notification. Without this the sequence
+"change detected → fingerprint stored → rebuild crashes" would record the new
+fingerprint against an un-rebuilt sheet and never notice that change again.
+
+**Every 6 hours it rebuilds anyway.** `safetyNetRebuild` does not consult the
+dirty flag, the fingerprints, or anything else — it just rebuilds. This is the
+ceiling on staleness, and it covers the failure modes the other mechanisms
+cannot see: a missed `onEdit`, an IMPORTRANGE that refreshed without changing
+the fingerprint window, a trigger that got disabled, or a run of failed
+rebuilds. Afterwards it re-seeds the fingerprints so the next poll compares
+against what was actually built.
+
+**Watch status surfaces trouble.** It flags a last-successful-build older than
+`staleAfterHours`, reports the last failure and its message, and warns if the
+safety-net trigger is missing while the others are installed.
 
 ---
 

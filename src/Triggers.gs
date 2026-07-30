@@ -12,10 +12,11 @@
  *                   IMPORTRANGE-fed ranges for changes made in other files
  */
 
-var PROP_DIRTY     = 'kip.dirty';
-var PROP_LAST_POLL = 'kip.lastPoll';
+var PROP_DIRTY      = 'kip.dirty';
+var PROP_LAST_POLL  = 'kip.lastPoll';
 var PROP_LAST_BUILD = 'kip.lastBuild';
-var PROP_HASH      = 'kip.hash.';
+var PROP_LAST_ERROR = 'kip.lastError';
+var PROP_HASH       = 'kip.hash.';
 
 function props_() {
   return PropertiesService.getDocumentProperties();
@@ -195,11 +196,18 @@ function fingerprint_(ss, spec) {
 
 /**
  * Compare every polled range against its stored fingerprint.
- * @return {Array<string>} the ranges that changed.
+ *
+ * New fingerprints are returned rather than stored. The caller commits them
+ * only after the rebuild succeeds — otherwise a rebuild that throws would
+ * leave the new fingerprint recorded, and the change it represented would
+ * never be noticed again.
+ *
+ * @return {{ changed: Array<string>, pending: Object }}
  */
-function pollImports_(ss) {
+function detectImportChanges_(ss) {
   var store = props_();
   var changed = [];
+  var pending = {};
 
   for (var i = 0; i < CFG.watch.hashRanges.length; i++) {
     var spec = CFG.watch.hashRanges[i];
@@ -209,13 +217,37 @@ function pollImports_(ss) {
     if (current === null) continue;          // unreadable this round; try again next tick
 
     var previous = store.getProperty(key);
+
+    if (previous === null) {
+      store.setProperty(key, current);       // first sight of this range: seed, do not fire
+      continue;
+    }
     if (previous !== current) {
-      store.setProperty(key, current);
-      if (previous !== null) changed.push(spec.sheet);   // first run seeds, does not fire
+      changed.push(spec.sheet);
+      pending[key] = current;
     }
   }
 
-  return changed;
+  return { changed: changed, pending: pending };
+}
+
+function commitFingerprints_(pending) {
+  var store = props_();
+  for (var key in pending) {
+    if (Object.prototype.hasOwnProperty.call(pending, key)) {
+      store.setProperty(key, pending[key]);
+    }
+  }
+}
+
+/** Record the current state of every polled range without firing anything. */
+function seedFingerprints_(ss) {
+  var store = props_();
+  for (var i = 0; i < CFG.watch.hashRanges.length; i++) {
+    var spec = CFG.watch.hashRanges[i];
+    var current = fingerprint_(ss, spec);
+    if (current !== null) store.setProperty(PROP_HASH + spec.sheet, current);
+  }
 }
 
 /* ---------------------------------------------------------------------- *
@@ -230,20 +262,60 @@ function tick() {
   var dirty = readDirty_();
   if (dirty) reasons = reasons.concat(dirty.reasons);
 
+  var pending = {};
   var lastPoll = Number(store.getProperty(PROP_LAST_POLL) || 0);
-  var due = (Date.now() - lastPoll) >= CFG.watch.pollMinutes * 60000;
 
-  if (due) {
+  if ((Date.now() - lastPoll) >= CFG.watch.pollMinutes * 60000) {
     store.setProperty(PROP_LAST_POLL, String(Date.now()));
-    var changed = pollImports_(ss);
-    for (var i = 0; i < changed.length; i++) reasons.push(changed[i] + ' (imported data changed)');
+    var found = detectImportChanges_(ss);
+    pending = found.pending;
+    for (var i = 0; i < found.changed.length; i++) {
+      reasons.push(found.changed[i] + ' (imported data changed)');
+    }
   }
 
   if (!reasons.length) return;
 
+  // The dirty flag and the new fingerprints are discarded only once the
+  // rebuild has actually succeeded. If it throws, both survive, the next tick
+  // retries, and the throw still reaches Google's failure notification.
+  runBuild_(reasons, pending);
+}
+
+/**
+ * Fixed-schedule rebuild. Runs whether or not anything looked dirty, so a
+ * missed event, a swallowed edit, or a run of failed rebuilds cannot leave the
+ * roster stale for longer than CFG.watch.safetyNetHours.
+ */
+function safetyNetRebuild() {
+  var ss = SpreadsheetApp.getActive();
+  runBuild_(['safety net (every ' + CFG.watch.safetyNetHours + 'h)'], {});
+
+  // Re-align the fingerprints with what was just built, so the next poll
+  // compares against current state instead of re-reporting an old change.
+  seedFingerprints_(ss);
+  props_().setProperty(PROP_LAST_POLL, String(Date.now()));
+}
+
+/** Shared build path: records success, records failure, always re-throws. */
+function runBuild_(reasons, pendingFingerprints) {
+  var store = props_();
+  var summary;
+
+  try {
+    summary = rebuildAll();
+  } catch (err) {
+    store.setProperty(PROP_LAST_ERROR, JSON.stringify({
+      at: new Date().toISOString(),
+      reasons: reasons,
+      message: String(err && err.message ? err.message : err)
+    }));
+    throw err;   // let Apps Script send its own failure notification
+  }
+
   clearDirty_();
-  var summary = rebuildAll();
-  summary.reasons = reasons;
+  commitFingerprints_(pendingFingerprints);
+  store.deleteProperty(PROP_LAST_ERROR);
   store.setProperty(PROP_LAST_BUILD, JSON.stringify({
     at: new Date().toISOString(),
     students: summary.students,
@@ -252,6 +324,8 @@ function tick() {
     seconds: summary.seconds,
     reasons: reasons
   }));
+
+  return summary;
 }
 
 /**
@@ -276,18 +350,18 @@ function checkImportsNow() {
     }
   }
 
-  var changed = pollImports_(ss);
-
   if (unreadable.length) {
     ui.alert(
       'Cannot read: ' + unreadable.join(', ') + '\n\n' +
-      'The range is erroring or empty, so it was skipped rather than treated as ' +
-      'a change. Check the IMPORTRANGE authorization on those sheets.'
+      'The range is erroring or empty, so it was skipped rather than treated ' +
+      'as a change. Check the IMPORTRANGE authorization on those sheets.'
     );
     return;
   }
 
-  if (!changed.length) {
+  var found = detectImportChanges_(ss);
+
+  if (!found.changed.length) {
     ui.alert(
       'No change since the last check.\n\n' +
       'Note this compares what IMPORTRANGE has already pulled into this ' +
@@ -297,28 +371,17 @@ function checkImportsNow() {
     return;
   }
 
-  var summary = rebuildAll();
-  clearDirty_();
+  var summary = runBuild_(
+    ['manual check: ' + found.changed.join(', ')],
+    found.pending
+  );
+
   ui.alert(
-    'Changed: ' + changed.join(', ') + '\n\n' +
+    'Changed: ' + found.changed.join(', ') + '\n\n' +
     'Rebuilt in ' + summary.seconds + 's — ' +
     summary.students + ' students, ' + summary.guardians + ' guardians, ' +
     summary.warnings + ' warning(s).'
   );
-}
-
-/** Nightly backstop, so a missed event never leaves the roster stale for long. */
-function nightlyRebuild() {
-  var summary = rebuildAll();
-  clearDirty_();
-  props_().setProperty(PROP_LAST_BUILD, JSON.stringify({
-    at: new Date().toISOString(),
-    students: summary.students,
-    guardians: summary.guardians,
-    warnings: summary.warnings,
-    seconds: summary.seconds,
-    reasons: ['nightly safety net']
-  }));
 }
 
 function logTriggerError_(where, err) {
@@ -331,7 +394,7 @@ function logTriggerError_(where, err) {
  * Install / remove
  * ---------------------------------------------------------------------- */
 
-var MANAGED_HANDLERS = ['onEditHandler', 'onChangeHandler', 'tick', 'nightlyRebuild'];
+var MANAGED_HANDLERS = ['onEditHandler', 'onChangeHandler', 'tick', 'safetyNetRebuild'];
 
 function startWatching() {
   stopWatching();
@@ -341,12 +404,13 @@ function startWatching() {
   ScriptApp.newTrigger('onEditHandler').forSpreadsheet(ss).onEdit().create();
   ScriptApp.newTrigger('onChangeHandler').forSpreadsheet(ss).onChange().create();
   ScriptApp.newTrigger('tick').timeBased().everyMinutes(CFG.watch.tickMinutes).create();
-  ScriptApp.newTrigger('nightlyRebuild').timeBased()
-    .atHour(CFG.watch.safetyNetHour).everyDays(1).create();
+  ScriptApp.newTrigger('safetyNetRebuild').timeBased()
+    .everyHours(CFG.watch.safetyNetHours).create();
 
   // Seed the fingerprints so the first poll compares against a known state
   // instead of reporting everything as changed.
-  pollImports_(ss);
+  seedFingerprints_(ss);
+  props_().setProperty(PROP_LAST_POLL, String(Date.now()));
   clearDirty_();
 
   SpreadsheetApp.getUi().alert(
@@ -355,7 +419,8 @@ function startWatching() {
       ' queue a rebuild.\n' +
     '• Rebuilds run at most once every ' + CFG.watch.tickMinutes + ' minutes.\n' +
     '• Imported data is checked every ' + CFG.watch.pollMinutes + ' minutes.\n' +
-    '• A full rebuild runs nightly around ' + CFG.watch.safetyNetHour + ':00.'
+    '• A full rebuild runs every ' + CFG.watch.safetyNetHours + ' hours regardless, ' +
+      'so nothing can stay stale longer than that.'
   );
 }
 
@@ -384,21 +449,41 @@ function showWatchStatus() {
 
   var lines = [];
   lines.push('Triggers: ' + (installed.length ? installed.join(', ') : 'none installed'));
+  if (installed.length && installed.indexOf('safetyNetRebuild') === -1) {
+    lines.push('  ⚠ The every-' + CFG.watch.safetyNetHours + 'h safety net is NOT installed.');
+  }
   lines.push('');
-  lines.push('Pending rebuild: ' + (dirty
-    ? 'yes — ' + dirty.reasons.join('; ')
-    : 'no'));
-  lines.push('Imports last checked: ' + (lastPoll ? new Date(lastPoll).toLocaleString() : 'never'));
+  lines.push('Pending rebuild: ' + (dirty ? 'yes — ' + dirty.reasons.join('; ') : 'no'));
+  lines.push('Imports last checked: ' +
+    (lastPoll ? new Date(lastPoll).toLocaleString() : 'never'));
   lines.push('');
 
   if (lastBuild) {
     var b = JSON.parse(lastBuild);
-    lines.push('Last build: ' + new Date(b.at).toLocaleString());
+    var ageHours = (Date.now() - new Date(b.at).getTime()) / 3600000;
+
+    lines.push('Last successful build: ' + new Date(b.at).toLocaleString() +
+      '  (' + ageHours.toFixed(1) + 'h ago)');
     lines.push('  ' + b.students + ' students, ' + b.guardians + ' guardians, ' +
       b.seconds + 's, ' + b.warnings + ' warning(s)');
     lines.push('  triggered by: ' + (b.reasons || []).join('; '));
+
+    if (ageHours > CFG.watch.staleAfterHours) {
+      lines.push('');
+      lines.push('⚠ That is older than ' + CFG.watch.staleAfterHours + 'h. The safety ' +
+        'net should have run by now — check Apps Script → Executions.');
+    }
   } else {
-    lines.push('Last build: never (run "Rebuild now" once to seed).');
+    lines.push('Last successful build: never (run "Rebuild now" once to seed).');
+  }
+
+  var lastError = store.getProperty(PROP_LAST_ERROR);
+  if (lastError) {
+    var e = JSON.parse(lastError);
+    lines.push('');
+    lines.push('⚠ Last build FAILED: ' + new Date(e.at).toLocaleString());
+    lines.push('  ' + e.message);
+    lines.push('  The queued change was kept and will be retried.');
   }
 
   SpreadsheetApp.getUi().alert(lines.join('\n'));

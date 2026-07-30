@@ -63,8 +63,16 @@ var CFG = {
      */
     pollMinutes: 30,
 
-    /** A nightly rebuild that runs even if nothing looked dirty. */
-    safetyNetHour: 4
+    /**
+     * A rebuild that runs on a fixed schedule regardless of flags, so a missed
+     * event or a failed rebuild cannot leave the roster stale indefinitely.
+     * This is the ceiling on how wrong the sheet can be.
+     * Allowed values: 1, 2, 4, 6, 8, 12.
+     */
+    safetyNetHours: 6,
+
+    /** Watch status warns when the last successful build is older than this. */
+    staleAfterHours: 14
   },
 
   /**
