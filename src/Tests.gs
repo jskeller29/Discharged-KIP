@@ -206,6 +206,34 @@ function runParserTests() {
   check('a purely numeric paren is not a relationship',
     findRelationshipParen_('SHELLY BAYNE - (917) 312-0601'), null);
 
+  // --- Anonymisation for the shareable report -------------------------
+  check('mask keeps structure, drops identity',
+    maskLine_('*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601'),
+    '*Guardian 1 - AAAAAA AAAAA (Parent) - (999) 999-9999');
+  check('mask keeps the Contact slot number',
+    maskLine_('*Guardian 2 - Thomas Jefferson (Father) - Contact 3: t@aol.com'),
+    '*Guardian 2 - Aaaaaa Aaaaaaaaa (Father) - Contact 3: a@aaa.aaa');
+  check('mask keeps language words',
+    maskLine_('Guardian 1 - Ana Ruiz (Mother - Spanish)'),
+    'Guardian 1 - Aaa Aaaa (Mother - Spanish)');
+  check('mask preserves wrapped-name shape', maskLine_('SUYEON LII'), 'AAAAAA AAA');
+  check('mask leaves junk recognisable as junk', maskLine_('71- Ariel'), '99- Aaaaa');
+
+  var anon = new Anonymizer();
+  check('refs are sequential', [anon.ref('250080023'), anon.ref('250086846')],
+    ['S001', 'S002']);
+  check('refs are stable within a report', anon.ref('250080023'), 'S001');
+  check('quoted data is masked, prose is not',
+    anon.message('Guardian 1 is named "SHELLY BAYNE" in column G.'),
+    'Guardian 1 is named "AAAAAA AAAAA" in column G.');
+  check('bare OSIS becomes a ref',
+    anon.message('grouped into one household (250080023, 250086846)'),
+    'grouped into one household (S001, S002)');
+  // A masked ten-digit phone must not be mistaken for an OSIS.
+  check('masked phone digits stay digits',
+    anon.message('moved "5165099626" to position 2'),
+    'moved "9999999999" to position 2');
+
   // --- The "wait until the row is finished" gate ----------------------
   var rule = CFG.watch.editSheets['Non-Student'];
   var partial  = ['1001', 'Jefferson', '',      '',     '', '', '', '', '', '', '', ''];

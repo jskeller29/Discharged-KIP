@@ -78,6 +78,45 @@ now appears there. Expect some rows on the first run — that is the point.
 | `more values than the N available columns` | More emails or phones than there are columns |
 | `students were grouped into one household` | Probably a shared office number or placeholder email |
 
+### Two report tabs
+
+Each build writes both:
+
+**`Build Log`** — the full record, with real names, emails, phones and OSIS.
+Columns: When, Level, Code, OSIS, Where, Message, Source line. The `Source
+line` column holds the offending text verbatim, which is usually the fastest
+way to see what went wrong.
+
+**`Build Log (Shareable)`** — the same findings with every identifying value
+removed, safe to send outside the school. It opens with a summary counting
+findings by code, then the detail rows.
+
+Anonymisation is *structural*: the shape of a line survives, the content does
+not.
+
+```
+*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601
+*Guardian 1 - AAAAAA AAAAA (Parent) - (999) 999-9999
+```
+
+| Kept | Removed |
+| --- | --- |
+| Punctuation, spacing, dashes, asterisks, parentheses | Names → `A` / `a` by letter |
+| `Guardian` and `Contact` plus their slot numbers | Emails → `aaaa@aaaaa.aaa` |
+| Relationship and language words | Phone digits → `9` |
+| Letter case and token lengths | OSIS → `S001`, `S002`, … |
+
+Student references are sequential within a single report and meaningless
+outside it, so findings about the same student can be correlated with each
+other and with nothing else. Because token lengths survive, a wrapped name
+still looks wrapped and a malformed phone still looks malformed — which is
+the entire diagnostic.
+
+The relationship and language words that survive are a fixed list in
+`Anonymize.gs` (`KEEP_WORDS`). Anything not on it is masked, so an unusual
+relationship label will show up as `Aaaaaa` rather than leaking; add it to the
+list if you want it visible.
+
 ### Format variants the parser handles
 
 The blobs are hand-maintained, so several shapes show up beyond the common
