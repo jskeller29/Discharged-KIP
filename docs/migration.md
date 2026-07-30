@@ -71,12 +71,31 @@ now appears there. Expect some rows on the first run — that is the point.
 
 | Log message | Meaning |
 | --- | --- |
-| `Could not parse line` | A line in G/H/I does not match the `Guardian N - Name (Rel)` shape |
+| `Could not parse line` | A line in G/H/I is neither a guardian nor a usable value — genuine junk worth looking at |
 | `has contacts but no entry in column G` | A guardian slot appears in H or I but not the roster |
-| `named "X" in column G but "Y" alongside its contacts` | The name drifted between lines for one slot |
-| `two different values for Contact N` | Two lines claim the same slot and contact number |
-| `outside the N available columns` | A `Contact 5:` with nowhere to go |
+| `named "X" in column G but "Y" alongside its contacts` | The name differs between lines for one slot |
+| `two values for Contact N; ... moved to position M` | Two values claimed the same slot; both were kept |
+| `more values than the N available columns` | More emails or phones than there are columns |
 | `students were grouped into one household` | Probably a shared office number or placeholder email |
+
+### Format variants the parser handles
+
+The blobs are hand-maintained, so several shapes show up beyond the common
+one. All of these are parsed; none of them log.
+
+| Variant | Example |
+| --- | --- |
+| Unlabeled value | `*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601` — no `Contact N:` |
+| Continuation value | a bare `6462763207` on its own line, belonging to the guardian above |
+| Wrapped name | `SUYEON LII` / `KIM (Parent)` split across two lines, sometimes with no `Guardian N` prefix at all |
+| Several values in one slot | `Contact 1: JONATHAN.LII@GMAIL.COM SUYEON.K.LII@GMAIL.COM` |
+
+Parsing is kind-aware, which is what keeps this from over-reaching: the email
+blob only accepts text containing `@` as a loose value, and the phone blob only
+accepts something with at least seven digits. So `1110` and `71- Ariel` are
+still reported as unparseable rather than being absorbed into a name or written
+into a contact column. An area code is also never mistaken for a relationship —
+`(917)` is skipped, `(Parent)` is used.
 
 ---
 

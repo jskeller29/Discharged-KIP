@@ -64,9 +64,9 @@ function buildStudents_(rows, log) {
 function buildGuardians_(student, rosterBlob, emailBlob, phoneBlob, log) {
   var id = student.id;
 
-  var roster = parseBlob_(rosterBlob);
-  var emails = parseBlob_(emailBlob);
-  var phones = parseBlob_(phoneBlob);
+  var roster = parseBlob_(rosterBlob, KIND_ROSTER);
+  var emails = parseBlob_(emailBlob, KIND_EMAIL);
+  var phones = parseBlob_(phoneBlob, KIND_PHONE);
 
   reportUnparsed_(log, id, 'G (Parent Name)', roster.unparsed);
   reportUnparsed_(log, id, 'H (Email Address)', emails.unparsed);
@@ -164,6 +164,20 @@ function applyContacts_(log, id, where, lines, slotFor, bucket, capacity) {
       var contact = line.contacts[c];
       var slotIndex = contact.index;
 
+      // Already recorded on this guardian — a repeated value is not a conflict.
+      if (indexOfValue_(g[bucket], contact.value) !== -1) continue;
+
+      // An unlabeled value takes the next free column.
+      if (slotIndex === null) {
+        slotIndex = nextFreeIndex_(g[bucket], capacity);
+        if (slotIndex === null) {
+          log.warn(id, where,
+            'Guardian ' + line.slot + ' has more values than the ' + capacity +
+            ' available columns; dropped "' + contact.value + '".');
+          continue;
+        }
+      }
+
       if (slotIndex < 1 || slotIndex > capacity) {
         log.warn(id, where,
           'Guardian ' + line.slot + ' Contact ' + slotIndex + ' ("' + contact.value +
@@ -173,14 +187,39 @@ function applyContacts_(log, id, where, lines, slotFor, bucket, capacity) {
 
       var existing = g[bucket][slotIndex - 1];
       if (existing && existing !== contact.value) {
-        log.warn(id, where,
-          'Guardian ' + line.slot + ' has two different values for Contact ' +
-          slotIndex + ': kept "' + existing + '", dropped "' + contact.value + '".');
-        continue;
+        // Do not lose the value just because its stated slot is taken.
+        var free = nextFreeIndex_(g[bucket], capacity);
+        if (free === null) {
+          log.warn(id, where,
+            'Guardian ' + line.slot + ' has two different values for Contact ' +
+            slotIndex + ' and no free column: kept "' + existing +
+            '", dropped "' + contact.value + '".');
+          continue;
+        }
+        log.info(id, where,
+          'Guardian ' + line.slot + ' has two values for Contact ' + slotIndex +
+          '; kept "' + existing + '" there and moved "' + contact.value +
+          '" to position ' + free + '.');
+        slotIndex = free;
       }
       g[bucket][slotIndex - 1] = contact.value;
     }
   }
+}
+
+/** First empty position in a sparse contact array, 1-based, or null if full. */
+function nextFreeIndex_(bucket, capacity) {
+  for (var i = 0; i < capacity; i++) {
+    if (!bucket[i]) return i + 1;
+  }
+  return null;
+}
+
+function indexOfValue_(bucket, value) {
+  for (var i = 0; i < bucket.length; i++) {
+    if (bucket[i] === value) return i;
+  }
+  return -1;
 }
 
 function reportUnparsed_(log, id, where, unparsed) {

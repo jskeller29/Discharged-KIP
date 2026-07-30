@@ -2,8 +2,8 @@
  * Blob parsing. Pure functions — no SpreadsheetApp calls — so Tests.gs can
  * exercise them directly.
  *
- * The source format is one line per (guardian slot, contact) pair — so a
- * guardian with two emails occupies two lines, repeating its own name:
+ * The common shape is one line per (guardian slot, contact) pair, so a guardian
+ * with two emails occupies two lines, repeating its own name:
  *
  *   *Guardian 1 - Martha Jefferson (Mother) - Contact 1: Martha1@gmail.com
  *   *Guardian 1 - Martha Jefferson (Mother) - Contact 2: Martha2@gmail.com
@@ -11,64 +11,171 @@
  *
  * A leading "*" means DNA = "No" (the guardian IS a primary contact).
  * The parenthetical is "Relationship" or "Relationship - Language".
- * The roster blob (column G) uses the same shape with the Contact part absent,
- * one line per guardian.
+ * The roster blob (column G) uses the same shape with the Contact part absent.
  *
- * Join on the slot number, not the name. The name is expected to repeat
- * identically across a slot's lines; when it does not, that is a data problem
- * worth reporting, but it must never split one slot into two guardians or
- * cause a contact to be dropped.
+ * Join on the slot number, not the name. Where a slot number is absent the
+ * entry's position in the blob is used instead, which keeps the roster, email
+ * and phone blobs aligned for records that omit the prefix entirely.
+ *
+ * Four variants show up in the live data and are all handled here:
+ *
+ *   1. Unlabeled contact — the value follows " - " with no "Contact N:"
+ *        *Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601
+ *   2. Continuation value — a bare value on its own line, belonging to the
+ *      guardian above it
+ *        *Guardian 1 - ... - Contact 1: 5165099626
+ *        6462763207
+ *   3. Wrapped name — one guardian split across lines, sometimes with no
+ *      "Guardian N" prefix at all
+ *        SUYEON LII
+ *        KIM (Parent) - Contact 1: JONATHAN.LII@GMAIL.COM
+ *   4. Several values in one slot
+ *        Contact 1: JONATHAN.LII@GMAIL.COM SUYEON.K.LII@GMAIL.COM
+ *
+ * Parsing is kind-aware: the email blob only accepts things containing "@" as
+ * loose values, the phone blob only accepts things that look like numbers. That
+ * is what keeps genuine junk ("1110", "71- Ariel") in the Build Log instead of
+ * being silently absorbed into a name or a contact slot.
  */
 
 var RE_GUARDIAN_HEAD = /^\s*(\*?)\s*Guardian\s*(\d+)\s*-\s*([\s\S]*)$/i;
 var RE_CONTACT_START = /Contact\s*\d+\s*:/i;
 var RE_CONTACT_ALL   = /Contact\s*(\d+)\s*:\s*([\s\S]*?)(?=\s*-?\s*Contact\s*\d+\s*:|$)/gi;
-var RE_PARENTHETICAL = /\(([^)]*)\)\s*$/;
+var RE_ANY_PAREN     = /\(([^)]*)\)/g;
+var RE_NUMERIC_ONLY  = /^[\d\s\-.]*$/;
 var RE_TRAILING_JUNK = /[\s\-–—]+$/;
+var RE_LEADING_JUNK  = /^[\s\-–—:]+/;
+
+var RE_EMAIL_ALL = /[^\s,;<>()]+@[^\s,;<>()]+/g;
+var RE_PHONE_ALL = /\(?\d[\d\s().\-]{6,}\d/g;
+
+var KIND_ROSTER = 'roster';
+var KIND_EMAIL  = 'email';
+var KIND_PHONE  = 'phone';
+
+/** Pasted rosters routinely carry non-breaking / narrow spaces. */
+function normSpace_(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/[   ]/g, ' ')
+    .trim();
+}
 
 /**
- * Parse one line.
- * @return {?Object} null when the line is blank or not a Guardian line.
+ * Every contact value of the expected kind found in a piece of text.
+ * Returns [] for the roster blob, which carries no contacts.
+ */
+function extractValues_(text, kind) {
+  var source = String(text || '');
+
+  if (kind === KIND_EMAIL) {
+    return source.match(RE_EMAIL_ALL) || [];
+  }
+
+  if (kind === KIND_PHONE) {
+    var found = source.match(RE_PHONE_ALL) || [];
+    var out = [];
+    for (var i = 0; i < found.length; i++) {
+      var value = found[i].trim();
+      // Seven digits is the shortest thing worth calling a phone number; this
+      // is what rejects fragments like "1110".
+      if (normPhone_(value).length >= 7) out.push(value);
+    }
+    return out;
+  }
+
+  return [];
+}
+
+/** True when a line is nothing but contact values and separators. */
+function isMostlyValues_(line, values) {
+  var rest = line;
+  for (var i = 0; i < values.length; i++) {
+    rest = rest.replace(values[i], ' ');
+  }
+  return rest.replace(/[\s,;:\-–—+/]/g, '') === '';
+}
+
+/**
+ * The first parenthetical that reads as a relationship rather than an area
+ * code — so "(Parent)" is found and "(917)" is skipped.
+ * @return {?{start: number, end: number, inner: string}}
+ */
+function findRelationshipParen_(text) {
+  RE_ANY_PAREN.lastIndex = 0;
+  var m;
+  while ((m = RE_ANY_PAREN.exec(text)) !== null) {
+    if (!RE_NUMERIC_ONLY.test(m[1])) {
+      return { start: m.index, end: m.index + m[0].length, inner: m[1] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse one logical entry — which may have been assembled from several
+ * physical lines.
+ *
+ * @return {?Object} null when the text carries no usable guardian.
  *   { slot, starred, dna, first, last, name, relationship, language,
  *     contacts: [{ index, value }], raw }
+ *   `slot` is null when the entry had no "Guardian N" prefix; `index` is null
+ *   for a contact whose slot was not stated and should take the next free one.
  */
-function parseGuardianLine_(line) {
-  if (line === null || line === undefined) return null;
-  // Pasted rosters routinely carry non-breaking / narrow spaces. Normalise
-  // them first so the \s+ splits below behave predictably.
-  var text = String(line).replace(/[\u00A0\u2007\u202F]/g, ' ').trim();
-  if (!text) return null;
+function parseEntry_(text, kind) {
+  var raw = normSpace_(text);
+  if (!raw) return null;
 
-  var head = RE_GUARDIAN_HEAD.exec(text);
-  if (!head) return null;
+  var head = RE_GUARDIAN_HEAD.exec(raw);
+  var starred, slot, rest;
 
-  var starred = head[1] === '*';
-  var slot = Number(head[2]);
-  var rest = head[3];
+  if (head) {
+    starred = head[1] === '*';
+    slot = Number(head[2]);
+    rest = head[3];
+  } else {
+    starred = /^\*/.test(raw);
+    slot = null;
+    rest = raw.replace(/^\*\s*/, '');
+  }
 
-  // Split the line into "name + parenthetical" and the trailing contact list.
+  // --- labeled contacts -------------------------------------------------
   var contacts = [];
   var namePart = rest;
   var cut = rest.search(RE_CONTACT_START);
+
   if (cut !== -1) {
     namePart = rest.slice(0, cut).replace(RE_TRAILING_JUNK, '');
     var tail = rest.slice(cut);
     RE_CONTACT_ALL.lastIndex = 0;
     var m;
     while ((m = RE_CONTACT_ALL.exec(tail)) !== null) {
-      var value = m[2].replace(RE_TRAILING_JUNK, '').trim();
-      if (value) contacts.push({ index: Number(m[1]), value: value });
+      var label = Number(m[1]);
+      var body = m[2].replace(RE_TRAILING_JUNK, '').trim();
+      if (!body) continue;
+
+      // One slot can carry several values; the first keeps the stated index
+      // and the rest take the next free ones.
+      var values = extractValues_(body, kind);
+      if (values.length) {
+        for (var v = 0; v < values.length; v++) {
+          contacts.push({ index: v === 0 ? label : null, value: values[v] });
+        }
+      } else {
+        contacts.push({ index: label, value: body });
+      }
       if (RE_CONTACT_ALL.lastIndex === m.index) RE_CONTACT_ALL.lastIndex++;
     }
   }
 
-  // Pull "(Relationship)" or "(Relationship - Language)" off the end.
+  // --- relationship, language, and any unlabeled trailing value ---------
   var relationship = '';
   var language = '';
-  var paren = RE_PARENTHETICAL.exec(namePart);
+  var trailing = '';
+  var paren = findRelationshipParen_(namePart);
+
   if (paren) {
-    namePart = namePart.slice(0, paren.index);
-    var inner = paren[1];
+    trailing = namePart.slice(paren.end);
+    var inner = paren.inner;
     var dash = inner.indexOf('-');
     if (dash === -1) {
       relationship = inner.trim();
@@ -76,9 +183,29 @@ function parseGuardianLine_(line) {
       relationship = inner.slice(0, dash).trim();
       language = inner.slice(dash + 1).trim();
     }
+    namePart = namePart.slice(0, paren.start);
+  } else {
+    // No parenthetical, but the name may still be followed by a bare value.
+    var loose = extractValues_(namePart, kind);
+    if (loose.length) {
+      var at = namePart.indexOf(loose[0]);
+      trailing = namePart.slice(at);
+      namePart = namePart.slice(0, at);
+    }
   }
 
-  var name = namePart.replace(/\s+/g, ' ').trim();
+  var unlabeled = extractValues_(trailing.replace(RE_LEADING_JUNK, ''), kind);
+  for (var u = 0; u < unlabeled.length; u++) {
+    contacts.push({ index: null, value: unlabeled[u] });
+  }
+
+  var name = namePart.replace(RE_TRAILING_JUNK, '').replace(/\s+/g, ' ').trim();
+
+  // An entry with no prefix, no relationship and no contacts is not a
+  // guardian — it is stray text, and the caller should report it.
+  if (slot === null && !paren && !contacts.length) return null;
+  if (!name && !contacts.length) return null;
+
   var space = name.indexOf(' ');
 
   return {
@@ -91,27 +218,85 @@ function parseGuardianLine_(line) {
     relationship: relationship,
     language:     language || CFG.defaultLanguage,
     contacts:     contacts,
-    raw:          text
+    raw:          raw
   };
 }
 
 /**
- * Parse a whole blob into an array of per-line results, skipping blanks and
- * collecting anything that did not look like a Guardian line.
+ * Parse a whole blob.
+ *
+ * Physical lines are first assembled into logical entries: a line starting
+ * with "Guardian N -" begins one, a line that is nothing but contact values
+ * attaches to the entry above it, and anything else is treated as a wrapped
+ * continuation — but only while the current entry is still "open", meaning it
+ * has not yet picked up a relationship parenthetical. That last condition is
+ * what stops junk from being appended to an already-complete guardian.
+ *
+ * @param {*} blob
+ * @param {string} kind  KIND_ROSTER | KIND_EMAIL | KIND_PHONE
  * @return {{ lines: Array<Object>, unparsed: Array<string> }}
  */
-function parseBlob_(blob) {
+function parseBlob_(blob, kind) {
   var out = { lines: [], unparsed: [] };
   if (blob === null || blob === undefined || blob === '') return out;
 
+  kind = kind || KIND_ROSTER;
+
   var raw = String(blob).split(/\r\n|\r|\n/);
+  var entries = [];
+
   for (var i = 0; i < raw.length; i++) {
-    var trimmed = raw[i].trim();
-    if (!trimmed) continue;
-    var parsed = parseGuardianLine_(trimmed);
-    if (parsed) out.lines.push(parsed);
-    else out.unparsed.push(trimmed);
+    var line = normSpace_(raw[i]);
+    if (!line) continue;
+
+    if (RE_GUARDIAN_HEAD.test(line)) {
+      entries.push({ text: line, extra: [] });
+      continue;
+    }
+
+    var values = extractValues_(line, kind);
+    if (values.length && isMostlyValues_(line, values)) {
+      if (entries.length) {
+        var target = entries[entries.length - 1];
+        for (var v = 0; v < values.length; v++) target.extra.push(values[v]);
+      } else {
+        out.unparsed.push(line);
+      }
+      continue;
+    }
+
+    if (!entries.length) {
+      entries.push({ text: line, extra: [] });
+    } else if (!findRelationshipParen_(entries[entries.length - 1].text)) {
+      entries[entries.length - 1].text += ' ' + line;
+    } else {
+      out.unparsed.push(line);
+    }
   }
+
+  for (var e = 0; e < entries.length; e++) {
+    var parsed = parseEntry_(entries[e].text, kind);
+    if (!parsed) {
+      out.unparsed.push(entries[e].text);
+      continue;
+    }
+    for (var x = 0; x < entries[e].extra.length; x++) {
+      parsed.contacts.push({ index: null, value: entries[e].extra[x] });
+    }
+    out.lines.push(parsed);
+  }
+
+  // Entries with no "Guardian N" prefix fall back to their position, so a
+  // record that omits the prefix in all three blobs still lines up.
+  var next = 1;
+  for (var p = 0; p < out.lines.length; p++) {
+    if (out.lines[p].slot === null) {
+      out.lines[p].slot = next++;
+    } else {
+      next = out.lines[p].slot + 1;
+    }
+  }
+
   return out;
 }
 
