@@ -14,7 +14,7 @@ function runParserTests() {
   }
 
   // --- Roster line, no contact ---------------------------------------
-  var roster = parseGuardianLine_('*Guardian 1 - Martha Jefferson (Mother)');
+  var roster = parseEntry_('*Guardian 1 - Martha Jefferson (Mother)', KIND_ROSTER);
   check('roster slot', roster.slot, 1);
   check('roster starred', roster.starred, true);
   check('roster dna', roster.dna, 'No');
@@ -26,23 +26,25 @@ function runParserTests() {
 
   // --- Unstarred means DNA "Yes" -------------------------------------
   check('unstarred dna',
-    parseGuardianLine_('Guardian 2 - Thomas Jefferson (Father)').dna, 'Yes');
+    parseEntry_('Guardian 2 - Thomas Jefferson (Father)', KIND_ROSTER).dna, 'Yes');
 
   // --- Relationship + language ---------------------------------------
-  var bilingual = parseGuardianLine_('*Guardian 1 - Ana Ruiz (Mother - Spanish)');
+  var bilingual = parseEntry_('*Guardian 1 - Ana Ruiz (Mother - Spanish)', KIND_ROSTER);
   check('language relationship', bilingual.relationship, 'Mother');
   check('language value', bilingual.language, 'Spanish');
 
   // --- Contact line ---------------------------------------------------
-  var contact = parseGuardianLine_(
-    '*Guardian 1 - Martha Jefferson (Mother) - Contact 1: Martha1@gmail.com');
+  var contact = parseEntry_(
+    '*Guardian 1 - Martha Jefferson (Mother) - Contact 1: Martha1@gmail.com',
+    KIND_EMAIL);
   check('contact name unaffected', contact.first + ' ' + contact.last, 'Martha Jefferson');
   check('contact payload', contact.contacts, [{ index: 1, value: 'Martha1@gmail.com' }]);
 
   // --- Phone formatting survives --------------------------------------
   check('phone payload',
-    parseGuardianLine_(
-      '*Guardian 1 - Martha Jefferson (Mother) - Contact 1: (111) 111-1111'
+    parseEntry_(
+      '*Guardian 1 - Martha Jefferson (Mother) - Contact 1: (111) 111-1111',
+      KIND_PHONE
     ).contacts,
     [{ index: 1, value: '(111) 111-1111' }]);
 
@@ -126,6 +128,111 @@ function runParserTests() {
   check('blank blob', parseBlob_('').lines, []);
   check('null blob', parseBlob_(null).lines, []);
   check('non-guardian line reported', parseBlob_('see office').unparsed, ['see office']);
+
+  // --- Variants found in the live data --------------------------------
+  // Each of these came out of a Build Log run over the real roster.
+
+  // Unlabeled contact: the value follows " - " with no "Contact N:".
+  var unlabeled = buildGuardians_(
+    { id: '250080023', guardians: [] },
+    '*Guardian 1 - SHELLY BAYNE (Parent)\n*Guardian 2 - GUYTE MCCORD (Parent)',
+    '*Guardian 1 - SHELLY BAYNE (Parent)\n' +
+      '*Guardian 2 - GUYTE MCCORD (Parent) - gpmcoord@gmail.com',
+    '*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601',
+    new Log()
+  );
+  check('unlabeled: name excludes the value', unlabeled[0].name, 'SHELLY BAYNE');
+  check('unlabeled: phone captured', unlabeled[0].phones[0], '(917) 312-0601');
+  check('unlabeled: email captured', unlabeled[1].emails[0], 'gpmcoord@gmail.com');
+  // "(917)" must not be mistaken for the relationship parenthetical.
+  check('unlabeled: relationship survives', unlabeled[0].relationship, 'Parent');
+
+  // Wrapped name with no "Guardian N" prefix, plus two emails in one slot
+  // and a bare continuation phone.
+  var wrapped = buildGuardians_(
+    { id: '250086846', guardians: [] },
+    'SUYEON LII\nKIM (Parent)',
+    'SUYEON LII\nKIM (Parent) - Contact 1: JONATHAN.LII@GMAIL.COM SUYEON.K.LII@GMAIL.COM',
+    'SUYEON LII\nKIM (Parent) - Contact 1: 5165099626\n6462763207',
+    new Log()
+  );
+  check('wrapped: one guardian, not three', wrapped.length, 1);
+  check('wrapped: name rejoined', wrapped[0].name, 'SUYEON LII KIM');
+  check('wrapped: both emails kept',
+    [wrapped[0].emails[0], wrapped[0].emails[1]],
+    ['JONATHAN.LII@GMAIL.COM', 'SUYEON.K.LII@GMAIL.COM']);
+  check('wrapped: continuation phone kept',
+    [wrapped[0].phones[0], wrapped[0].phones[1]],
+    ['5165099626', '6462763207']);
+
+  // A bare value on its own line belongs to the guardian above it.
+  var continued = buildGuardians_(
+    { id: '250238891', guardians: [] },
+    '*Guardian 1 - Gina Johnson (Mother)',
+    '*Guardian 1 - Gina Johnson (Mother) - Contact 1: gjohnson@work.com\n' +
+      'ginajohnson995@gmail.com',
+    '',
+    new Log()
+  );
+  check('continuation: second email kept', continued[0].emails[1],
+    'ginajohnson995@gmail.com');
+  check('continuation: name untouched', continued[0].name, 'Gina Johnson');
+
+  // Junk must stay visible rather than being absorbed into a name or a slot.
+  var junkLog = new Log();
+  var junk = buildGuardians_(
+    { id: '257850594', guardians: [] },
+    '*Guardian 1 - Real Person (Mother)',
+    '*Guardian 1 - Real Person (Mother) - Contact 1: real@x.com\n1110',
+    '*Guardian 1 - Real Person (Mother) - Contact 1: (718) 555-1212\n71- Ariel',
+    junkLog
+  );
+  check('junk: name not corrupted', junk[0].name, 'Real Person');
+  check('junk: real values kept',
+    [junk[0].emails[0], junk[0].phones[0]], ['real@x.com', '(718) 555-1212']);
+  check('junk: "1110" not taken as an email', junk[0].emails[1] || '', '');
+  check('junk: both fragments reported', junkLog.counts.WARN, 2);
+
+  // Value extraction is kind-aware.
+  check('email kind ignores digits', extractValues_('1110', KIND_EMAIL), []);
+  check('phone kind rejects short fragments', extractValues_('1110', KIND_PHONE), []);
+  check('phone kind rejects "71- Ariel"', extractValues_('71- Ariel', KIND_PHONE), []);
+  check('phone kind reads formatted numbers',
+    extractValues_('Contact 1: (917) 312-0601', KIND_PHONE), ['(917) 312-0601']);
+  check('phone kind reads bare numbers',
+    extractValues_('5165099626', KIND_PHONE), ['5165099626']);
+  check('area code is not a relationship',
+    findRelationshipParen_('SHELLY BAYNE (Parent) - (917) 312-0601').inner, 'Parent');
+  check('a purely numeric paren is not a relationship',
+    findRelationshipParen_('SHELLY BAYNE - (917) 312-0601'), null);
+
+  // --- Anonymisation for the shareable report -------------------------
+  check('mask keeps structure, drops identity',
+    maskLine_('*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601'),
+    '*Guardian 1 - AAAAAA AAAAA (Parent) - (999) 999-9999');
+  check('mask keeps the Contact slot number',
+    maskLine_('*Guardian 2 - Thomas Jefferson (Father) - Contact 3: t@aol.com'),
+    '*Guardian 2 - Aaaaaa Aaaaaaaaa (Father) - Contact 3: a@aaa.aaa');
+  check('mask keeps language words',
+    maskLine_('Guardian 1 - Ana Ruiz (Mother - Spanish)'),
+    'Guardian 1 - Aaa Aaaa (Mother - Spanish)');
+  check('mask preserves wrapped-name shape', maskLine_('SUYEON LII'), 'AAAAAA AAA');
+  check('mask leaves junk recognisable as junk', maskLine_('71- Ariel'), '99- Aaaaa');
+
+  var anon = new Anonymizer();
+  check('refs are sequential', [anon.ref('250080023'), anon.ref('250086846')],
+    ['S001', 'S002']);
+  check('refs are stable within a report', anon.ref('250080023'), 'S001');
+  check('quoted data is masked, prose is not',
+    anon.message('Guardian 1 is named "SHELLY BAYNE" in column G.'),
+    'Guardian 1 is named "AAAAAA AAAAA" in column G.');
+  check('bare OSIS becomes a ref',
+    anon.message('grouped into one household (250080023, 250086846)'),
+    'grouped into one household (S001, S002)');
+  // A masked ten-digit phone must not be mistaken for an OSIS.
+  check('masked phone digits stay digits',
+    anon.message('moved "5165099626" to position 2'),
+    'moved "9999999999" to position 2');
 
   // --- The "wait until the row is finished" gate ----------------------
   var rule = CFG.watch.editSheets['Non-Student'];

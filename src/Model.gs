@@ -22,7 +22,7 @@ function buildStudents_(rows, log) {
     var sheetRow = CFG.outputted.firstDataRow + r;
 
     if (seen[id]) {
-      log.warn(id, CFG.sheets.outputted,
+      log.warn('DUPLICATE_OSIS', id, CFG.sheets.outputted,
         'Duplicate OSIS — also on row ' + seen[id] + '. Both rows kept; guardian ' +
         'lookups elsewhere resolve to the first.');
     } else {
@@ -64,9 +64,9 @@ function buildStudents_(rows, log) {
 function buildGuardians_(student, rosterBlob, emailBlob, phoneBlob, log) {
   var id = student.id;
 
-  var roster = parseBlob_(rosterBlob);
-  var emails = parseBlob_(emailBlob);
-  var phones = parseBlob_(phoneBlob);
+  var roster = parseBlob_(rosterBlob, KIND_ROSTER);
+  var emails = parseBlob_(emailBlob, KIND_EMAIL);
+  var phones = parseBlob_(phoneBlob, KIND_PHONE);
 
   reportUnparsed_(log, id, 'G (Parent Name)', roster.unparsed);
   reportUnparsed_(log, id, 'H (Email Address)', emails.unparsed);
@@ -101,9 +101,9 @@ function buildGuardians_(student, rosterBlob, emailBlob, phoneBlob, log) {
     var rl = roster.lines[i];
     var g = slotFor(rl);
     if (g.fromRoster) {
-      log.warn(id, 'G (Parent Name)',
+      log.warn('ROSTER_DUPLICATE', id, 'G (Parent Name)',
         'Guardian ' + rl.slot + ' listed more than once in the roster. Kept "' +
-        g.first + ' ' + g.last + '", ignored "' + rl.name + '".');
+        g.first + ' ' + g.last + '", ignored "' + rl.name + '".', rl.raw);
       continue;
     }
     g.first = rl.first;
@@ -126,18 +126,19 @@ function buildGuardians_(student, rosterBlob, emailBlob, phoneBlob, log) {
     var guardian = bySlot[order[k]];
 
     if (!guardian.fromRoster) {
-      log.warn(id, CFG.sheets.outputted,
+      log.warn('ORPHAN_SLOT', id, CFG.sheets.outputted,
         'Guardian ' + guardian.slot + ' has contacts but no entry in column G. ' +
         'Kept using the name found alongside the contact ("' +
-        guardian.first + ' ' + guardian.last + '").');
+        guardian.first + ' ' + guardian.last + '").', guardian.raw);
     }
 
     var variants = Object.keys(guardian.variants);
     if (variants.length) {
-      log.info(id, CFG.sheets.outputted,
+      log.info('NAME_VARIANT', id, CFG.sheets.outputted,
         'Guardian ' + guardian.slot + ' is named "' + guardian.first + ' ' +
         guardian.last + '" in column G but ' + variants.join(' / ') +
-        ' alongside its contacts. Contacts were kept on slot ' + guardian.slot + '.');
+        ' alongside its contacts. Contacts were kept on slot ' + guardian.slot + '.',
+        guardian.raw);
     }
 
     guardian.name = (guardian.first + ' ' + guardian.last).replace(/\s+/g, ' ').trim();
@@ -164,28 +165,68 @@ function applyContacts_(log, id, where, lines, slotFor, bucket, capacity) {
       var contact = line.contacts[c];
       var slotIndex = contact.index;
 
+      // Already recorded on this guardian — a repeated value is not a conflict.
+      if (indexOfValue_(g[bucket], contact.value) !== -1) continue;
+
+      // An unlabeled value takes the next free column.
+      if (slotIndex === null) {
+        slotIndex = nextFreeIndex_(g[bucket], capacity);
+        if (slotIndex === null) {
+          log.warn('TOO_MANY_VALUES', id, where,
+            'Guardian ' + line.slot + ' has more values than the ' + capacity +
+            ' available columns; dropped "' + contact.value + '".', line.raw);
+          continue;
+        }
+      }
+
       if (slotIndex < 1 || slotIndex > capacity) {
-        log.warn(id, where,
+        log.warn('CONTACT_INDEX_RANGE', id, where,
           'Guardian ' + line.slot + ' Contact ' + slotIndex + ' ("' + contact.value +
-          '") is outside the ' + capacity + ' available columns and was dropped.');
+          '") is outside the ' + capacity + ' available columns and was dropped.',
+          line.raw);
         continue;
       }
 
       var existing = g[bucket][slotIndex - 1];
       if (existing && existing !== contact.value) {
-        log.warn(id, where,
-          'Guardian ' + line.slot + ' has two different values for Contact ' +
-          slotIndex + ': kept "' + existing + '", dropped "' + contact.value + '".');
-        continue;
+        // Do not lose the value just because its stated slot is taken.
+        var free = nextFreeIndex_(g[bucket], capacity);
+        if (free === null) {
+          log.warn('SLOT_COLLISION_DROPPED', id, where,
+            'Guardian ' + line.slot + ' has two different values for Contact ' +
+            slotIndex + ' and no free column: kept "' + existing +
+            '", dropped "' + contact.value + '".', line.raw);
+          continue;
+        }
+        log.info('SLOT_COLLISION', id, where,
+          'Guardian ' + line.slot + ' has two values for Contact ' + slotIndex +
+          '; kept "' + existing + '" there and moved "' + contact.value +
+          '" to position ' + free + '.', line.raw);
+        slotIndex = free;
       }
       g[bucket][slotIndex - 1] = contact.value;
     }
   }
 }
 
+/** First empty position in a sparse contact array, 1-based, or null if full. */
+function nextFreeIndex_(bucket, capacity) {
+  for (var i = 0; i < capacity; i++) {
+    if (!bucket[i]) return i + 1;
+  }
+  return null;
+}
+
+function indexOfValue_(bucket, value) {
+  for (var i = 0; i < bucket.length; i++) {
+    if (bucket[i] === value) return i;
+  }
+  return -1;
+}
+
 function reportUnparsed_(log, id, where, unparsed) {
   for (var i = 0; i < unparsed.length; i++) {
-    log.warn(id, where, 'Could not parse line: ' + unparsed[i]);
+    log.warn('UNPARSED_LINE', id, where, 'Could not parse this line.', unparsed[i]);
   }
 }
 
@@ -272,7 +313,7 @@ function assignHouseholds_(students, log) {
     if (members.length >= CFG.limits.suspiciousHouseholdSize) {
       var ids = [];
       for (var n = 0; n < members.length; n++) ids.push(members[n].id);
-      log.info(ids[0], 'Siblings',
+      log.info('LARGE_HOUSEHOLD', ids[0], 'Siblings',
         members.length + ' students were grouped into one household (' +
         ids.join(', ') + '). Worth checking for a shared office number or a ' +
         'placeholder email.');

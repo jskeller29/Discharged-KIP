@@ -10,7 +10,8 @@ var CFG = {
     parents:   'Parents Divided3',
     table:     'Table',
     contacts:  'Phone Contacts',
-    log:       'Build Log'
+    log:       'Build Log',
+    shareable: 'Build Log (Shareable)'
   },
 
   /**
