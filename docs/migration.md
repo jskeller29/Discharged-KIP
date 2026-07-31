@@ -77,6 +77,8 @@ now appears there. Expect some rows on the first run — that is the point.
 | `two values for Contact N; ... moved to position M` | Two values claimed the same slot; both were kept |
 | `more values than the N available columns` | More emails or phones than there are columns |
 | `students were grouped into one household` | Probably a shared office number or placeholder email |
+| `has a relationship but no name in the source` | e.g. `*Guardian 1 -  (Parent)` — the contacts were kept, the name is genuinely missing upstream |
+| `stood on its own line with no guardian named above it` | A bare value opened the blob; it was attached to the first slot by position |
 
 ### Two report tabs
 
@@ -128,6 +130,14 @@ one. All of these are parsed; none of them log.
 | Continuation value | a bare `6462763207` on its own line, belonging to the guardian above |
 | Wrapped name | `SUYEON LII` / `KIM (Parent)` split across two lines, sometimes with no `Guardian N` prefix at all |
 | Several values in one slot | `Contact 1: JONATHAN.LII@GMAIL.COM SUYEON.K.LII@GMAIL.COM` |
+| Nameless guardian | `*Guardian 1 -   (Parent)` — a slot and a relationship with no name |
+| Leading bare value | a blob whose first line is just an email or phone, with no guardian above it |
+
+The last two still log, because both are real upstream problems worth seeing —
+but they log **once**, accurately, and the contact data is kept either way. A
+nameless guardian used to be rejected outright, which made its roster line read
+as unparseable *and* its contact line read as an orphan slot: one problem,
+reported twice, under two wrong names.
 
 Parsing is kind-aware, which is what keeps this from over-reaching: the email
 blob only accepts text containing `@` as a loose value, and the phone blob only

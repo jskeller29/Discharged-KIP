@@ -206,6 +206,40 @@ function runParserTests() {
   check('a purely numeric paren is not a relationship',
     findRelationshipParen_('SHELLY BAYNE - (917) 312-0601'), null);
 
+  // A guardian with a relationship but no name is still a guardian. Rejecting
+  // it made the roster line read as unparseable AND its contact line read as
+  // an orphan slot — one data problem reported twice, under two wrong names.
+  var namelessLog = new Log();
+  var nameless = buildGuardians_(
+    { id: '5', guardians: [] },
+    '*Guardian 1 -   (Parent)',
+    '',
+    '*Guardian 1 -   (Parent) - Contact 1: (917) 312-0601',
+    namelessLog
+  );
+  check('nameless: kept as a guardian', nameless.length, 1);
+  check('nameless: relationship kept', nameless[0].relationship, 'Parent');
+  check('nameless: phone kept', nameless[0].phones[0], '(917) 312-0601');
+  check('nameless: reported once', namelessLog.rows.length, 1);
+  check('nameless: reported accurately', namelessLog.rows[0][LOG_COL.code],
+    'NAMELESS_GUARDIAN');
+
+  // A bare value as the very first line of a blob has no guardian above it to
+  // attach to. It falls to the first slot by position rather than being lost.
+  var leadingLog = new Log();
+  var leading = buildGuardians_(
+    { id: '6', guardians: [] },
+    '*Guardian 1 - Gina Johnson (Mother)',
+    'ginajohnson995@gmail.com',
+    '',
+    leadingLog
+  );
+  check('leading value: attached to slot 1', leading[0].emails[0],
+    'ginajohnson995@gmail.com');
+  check('leading value: name comes from the roster', leading[0].name, 'Gina Johnson');
+  check('leading value: attribution reported', leadingLog.rows[0][LOG_COL.code],
+    'VALUE_WITHOUT_GUARDIAN');
+
   // --- Anonymisation for the shareable report -------------------------
   check('mask keeps structure, drops identity',
     maskLine_('*Guardian 1 - SHELLY BAYNE (Parent) - (917) 312-0601'),

@@ -142,6 +142,13 @@ function buildGuardians_(student, rosterBlob, emailBlob, phoneBlob, log) {
     }
 
     guardian.name = (guardian.first + ' ' + guardian.last).replace(/\s+/g, ' ').trim();
+
+    if (!guardian.name) {
+      log.warn('NAMELESS_GUARDIAN', id, CFG.sheets.outputted,
+        'Guardian ' + guardian.slot + ' has a relationship but no name in the ' +
+        'source. Its contacts were kept.', guardian.raw);
+    }
+
     out.push(guardian);
   }
 
@@ -159,6 +166,12 @@ function applyContacts_(log, id, where, lines, slotFor, bucket, capacity) {
     var known = (g.first + ' ' + g.last).replace(/\s+/g, ' ').trim();
     if (lineName && known && normName_(lineName) !== normName_(known)) {
       g.variants['"' + lineName + '"'] = true;
+    }
+
+    if (line.positional && line.contacts.length) {
+      log.info('VALUE_WITHOUT_GUARDIAN', id, where,
+        'A value stood on its own line with no guardian named above it; ' +
+        'attached to Guardian ' + line.slot + ' by position.', line.raw);
     }
 
     for (var c = 0; c < line.contacts.length; c++) {

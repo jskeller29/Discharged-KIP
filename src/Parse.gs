@@ -204,7 +204,11 @@ function parseEntry_(text, kind) {
   // An entry with no prefix, no relationship and no contacts is not a
   // guardian — it is stray text, and the caller should report it.
   if (slot === null && !paren && !contacts.length) return null;
-  if (!name && !contacts.length) return null;
+
+  // A nameless guardian IS a guardian: "*Guardian 1 -  (Parent)" states a slot
+  // and a relationship, and the matching contact lines carry real values. Only
+  // reject when there is nothing usable at all.
+  if (!name && !contacts.length && !paren) return null;
 
   var space = name.indexOf(' ');
 
@@ -219,6 +223,26 @@ function parseEntry_(text, kind) {
     language:     language || CFG.defaultLanguage,
     contacts:     contacts,
     raw:          raw
+  };
+}
+
+/**
+ * A line that held nothing but contact values, with no guardian named above
+ * it. Flagged `positional` so the caller can report how it was attributed.
+ */
+function valueOnlyEntry_(raw) {
+  return {
+    slot:         null,
+    starred:      false,
+    dna:          'Yes',
+    first:        '',
+    last:         '',
+    name:         '',
+    relationship: '',
+    language:     CFG.defaultLanguage,
+    contacts:     [],
+    raw:          raw,
+    positional:   true
   };
 }
 
@@ -256,18 +280,25 @@ function parseBlob_(blob, kind) {
 
     var values = extractValues_(line, kind);
     if (values.length && isMostlyValues_(line, values)) {
-      if (entries.length) {
+      if (entries.length && entries[entries.length - 1].text !== null) {
         var target = entries[entries.length - 1];
         for (var v = 0; v < values.length; v++) target.extra.push(values[v]);
       } else {
-        out.unparsed.push(line);
+        // A value with no guardian above it. Rather than discard it, hold it
+        // as a slotless entry so it falls to the first slot by position and
+        // the caller can report how it was attached.
+        entries.push({ text: null, raw: line, extra: values.slice() });
       }
       continue;
     }
 
+    var open = entries.length &&
+      entries[entries.length - 1].text !== null &&
+      !findRelationshipParen_(entries[entries.length - 1].text);
+
     if (!entries.length) {
       entries.push({ text: line, extra: [] });
-    } else if (!findRelationshipParen_(entries[entries.length - 1].text)) {
+    } else if (open) {
       entries[entries.length - 1].text += ' ' + line;
     } else {
       out.unparsed.push(line);
@@ -275,13 +306,17 @@ function parseBlob_(blob, kind) {
   }
 
   for (var e = 0; e < entries.length; e++) {
-    var parsed = parseEntry_(entries[e].text, kind);
+    var entry = entries[e];
+    var parsed = entry.text === null
+      ? valueOnlyEntry_(entry.raw)
+      : parseEntry_(entry.text, kind);
+
     if (!parsed) {
-      out.unparsed.push(entries[e].text);
+      out.unparsed.push(entry.text);
       continue;
     }
-    for (var x = 0; x < entries[e].extra.length; x++) {
-      parsed.contacts.push({ index: null, value: entries[e].extra[x] });
+    for (var x = 0; x < entry.extra.length; x++) {
+      parsed.contacts.push({ index: null, value: entry.extra[x] });
     }
     out.lines.push(parsed);
   }
